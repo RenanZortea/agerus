@@ -4,10 +4,11 @@
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 RED='\033[0;31m'
+YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}=======================================${NC}"
-echo -e "${BLUE}   LLM Agent Installation Assistant    ${NC}"
+echo -e "${BLUE}   Agerus Installation Assistant       ${NC}"
 echo -e "${BLUE}=======================================${NC}"
 
 # --- Function: Interactive Menu (Arrow Keys) ---
@@ -61,7 +62,7 @@ function select_option {
 }
 
 # --- 1. Check Prerequisites ---
-echo -e "\n${BLUE}[1/5] Checking prerequisites...${NC}"
+echo -e "\n${BLUE}[1/6] Checking prerequisites...${NC}"
 
 # Rust
 if ! command -v cargo &>/dev/null; then
@@ -91,7 +92,7 @@ fi
 echo -e "${GREEN}✓ Ollama found${NC}"
 
 # --- 2. Check & Select Models ---
-echo -e "\n${BLUE}[2/5] Checking Ollama Models...${NC}"
+echo -e "\n${BLUE}[2/6] Checking Ollama Models...${NC}"
 
 # Get list of models (skip header 'NAME')
 MODELS=($(ollama list | tail -n +2 | awk '{print $1}'))
@@ -110,7 +111,7 @@ CHOSEN_MODEL=$SELECTED_ITEM
 echo -e "Selected Model: ${GREEN}$CHOSEN_MODEL${NC}"
 
 # --- 3. Configure Workspace ---
-echo -e "\n${BLUE}[3/5] Configuring Workspace...${NC}"
+echo -e "\n${BLUE}[3/6] Configuring Workspace...${NC}"
 echo "Where should the Agent store its files?"
 read -e -p "Path (default: ./workspace): " USER_PATH
 [ -z "$USER_PATH" ] && USER_PATH="./workspace"
@@ -121,9 +122,9 @@ FULL_PATH=$(realpath "$USER_PATH")
 echo -e "Workspace: ${GREEN}$FULL_PATH${NC}"
 
 # --- 4. Generate Config File ---
-echo -e "\n${BLUE}[4/5] Saving Configuration...${NC}"
+echo -e "\n${BLUE}[4/6] Saving Configuration...${NC}"
 
-CONFIG_DIR="$HOME/.config/copilot_rust_llama"
+CONFIG_DIR="$HOME/.config/agerus"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
 
 mkdir -p "$CONFIG_DIR"
@@ -137,7 +138,7 @@ EOF
 echo -e "Config saved to ${GREEN}$CONFIG_FILE${NC}"
 
 # --- 5. Build Project ---
-echo -e "\n${BLUE}[5/5] Building Rust Project (Release)...${NC}"
+echo -e "\n${BLUE}[5/6] Building Rust Project (Release)...${NC}"
 cargo build --release
 
 if [ $? -ne 0 ]; then
@@ -145,25 +146,29 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# --- Create Runner ---
-WRAPPER_NAME="run_agent.sh"
-BINARY_PATH="./target/release/copilot_rust_llama"
+# --- 6. Global Install (Copy Binary) ---
+echo -e "\n${BLUE}[6/6] Installing 'agerus' globally...${NC}"
 
-cat >$WRAPPER_NAME <<EOF
-#!/bin/bash
-# The Rust app now reads from ~/.config/copilot_rust_llama/config.toml automatically.
-# You can also manually override via ENV vars if needed, but it's not required.
+BINARY_PATH="$(pwd)/target/release/agerus"
+INSTALL_PATH="/usr/local/bin/agerus"
 
-"$BINARY_PATH"
-EOF
+echo "We will COPY '$BINARY_PATH' to '$INSTALL_PATH'."
+echo "This ensures the app runs even if you delete this source folder."
+echo -e "${YELLOW}This requires sudo permissions.${NC}"
 
-chmod +x $WRAPPER_NAME
+# We use 'cp' instead of 'ln' to copy the actual file
+if sudo cp "$BINARY_PATH" "$INSTALL_PATH"; then
+    echo -e "${GREEN}✓ Successfully installed 'agerus' to /usr/local/bin${NC}"
+else
+    echo -e "${RED}Failed to install globally.${NC}"
+    echo "You can manually run: sudo cp $BINARY_PATH /usr/local/bin/agerus"
+fi
 
 echo -e "\n${GREEN}=======================================${NC}"
 echo -e "${GREEN}   Installation Complete!              ${NC}"
 echo -e "${GREEN}=======================================${NC}"
 echo ""
 echo "Configuration is stored in: $CONFIG_FILE"
-echo "To start the agent, run:"
-echo -e "${BLUE}./$WRAPPER_NAME${NC}"
+echo "You can now run the agent from anywhere by typing:"
+echo -e "${BLUE}agerus${NC}"
 echo ""

@@ -3,6 +3,27 @@
 version = 4
 
 [[package]]
+name = "agerus"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "crossterm 0.29.0",
+ "dirs",
+ "futures-util",
+ "ratatui",
+ "regex",
+ "reqwest",
+ "scraper",
+ "serde",
+ "serde_json",
+ "textwrap",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -163,27 +184,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
 dependencies = [
  "unicode-segmentation",
-]
-
-[[package]]
-name = "copilot_rust_llama"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bytes",
- "crossterm 0.29.0",
- "dirs",
- "futures-util",
- "ratatui",
- "regex",
- "reqwest",
- "scraper",
- "serde",
- "serde_json",
- "textwrap",
- "tokio",
- "toml",
 ]
 
 [[package]]

@@ -25,7 +25,7 @@ impl Config {
         // 1. Determine config path: ~/.config/copilot_rust_llama/config.toml
         let config_dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?
-            .join("copilot_rust_llama");
+            .join("agerus");
 
         let config_path = config_dir.join("config.toml");
 
