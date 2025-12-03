@@ -1,92 +1,89 @@
-# LLM Agent - Rust Terminal Companion
+# Copilot Rust Llama
 
-This project provides a Rust-based LLM agent that runs alongside your terminal, offering full control and interaction through a command-line interface. It utilizes a language model (currently placeholder
+![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)
+![Rust](https://img.shields.io/badge/Made_with-Rust-orange.svg)
+![Docker](https://img.shields.io/badge/Environment-Docker-blue)
+![Ollama](https://img.shields.io/badge/AI-Ollama-white)
 
-- replace with your chosen model) and aims to be a versatile assistant for various tasks, from code generation to creative writing.
+A robust, terminal-based LLM agent written in Rust. This tool acts as an intelligent coding companion that runs alongside your terminal, allowing for safe command execution, file manipulation, and web browsing through a sandboxed environment.
 
-## Features
+It connects to a local [Ollama](https://ollama.com/) instance and utilizes the **Model Context Protocol (MCP)** to perform actions safely inside a Docker container.
 
-- **Real-time Interaction:** The agent responds to commands directly in your terminal.
-- **Command-Line Interface:** A simple and intuitive CLI for interacting with the LLM.
-- **Background Operation:** Runs independently, allowing you to continue using your terminal for other tasks.
-- **Rust-Based:** Leveraging Rust's performance and safety.
+## 🚀 Features
 
-## Getting Started
+- **Interactive TUI**: A rich Terminal User Interface built with [Ratatui](https://github.com/ratatui/ratatui), featuring split views for Chat and raw Terminal output.
+- **Sandboxed Execution**: All shell commands run inside an isolated Docker container (`ollama_dev_env`) to ensure host system safety.
+- **Model Context Protocol (MCP)**: Implements a tool server that allows the LLM to:
+  - `run_command`: Execute shell commands in the sandbox.
+  - `read_file` / `write_file`: Manage files in the workspace.
+  - `web_search`: Search the web using DuckDuckGo.
+  - `fetch_url`: Scrape and read content from websites.
+- **Smart Thinking**: Displays "Thinking" blocks for models that support reasoning (like DeepSeek or Qwen).
+- **Persistent Shell**: Maintains a persistent bash session, allowing stateful command execution (e.g., `cd` commands persist).
 
-**Prerequisites:**
+## 🛠️ Prerequisites
 
-- Rust toolchain installed: [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
-- A suitable LLM API key (e.g., OpenAI, Cohere, or a local model). Replace the placeholder in `src/main.rs` with your API key.
+Before running the agent, ensure you have the following installed:
 
-**Installation:**
+1.  **Rust Toolchain**: [Install Rust](https://www.rust-lang.org/tools/install)
+2.  **Docker**: Must be installed and running (used for the sandbox environment).
+3.  **Ollama**: [Install Ollama](https://ollama.com/) and pull the default model:
+    ```bash
+    ollama pull qwen3:8b
+    ```
+    _(Note: You can change the model in `src/agent.rs` if desired)_.
 
-1.  Clone the repository: `git clone [your_repository_url]`
-2.  Navigate to the project directory: `cd [your_repository_directory]`
-3.  Build the project: `cargo build --release`
-4.  Run the agent: `./target/release/llm-agent`
+## 📦 Installation & Usage
 
-## Usage
+1.  **Clone the repository:**
 
-Once the agent is running, you can interact with it by typing commands directly into your terminal. The current commands are defined in the `src/commands.rs` file.
+    ```bash
+    git clone [https://github.com/renanzortea/copilot_rust_llama.git](https://github.com/renanzortea/copilot_rust_llama.git)
+    cd copilot_rust_llama
+    ```
 
-## Configuration
+2.  **Build and Run:**
 
-The current configuration is managed through environment variables. You can set these before running the agent.
+    ```bash
+    cargo run --release
+    ```
 
-- `MODEL_API_KEY`: Your LLM API key (e.g., `OPENAI_API_KEY`).
-- `MODEL_NAME`: The name of the LLM model to use (e.g., "gpt-3.5-turbo").
+    _On the first run, the application will automatically:_
+    - Create a `./workspace` directory.
+    - Spin up a Docker container named `ollama_dev_env`.
+    - Install necessary tools (curl, git, build-essential, rust) inside the container.
 
-## Contributing
+3.  **Controls:**
+    - **Chat Mode**: Type your request and press `Enter`. Use `Alt+Enter` for newlines.
+    - **Switch Views**: Press `Tab` to toggle between the **Agent Chat** and the **Terminal** view.
+    - **Scroll**: `Up`/`Down` arrows or `PageUp`/`PageDown`.
+    - **Exit**: `Ctrl+C`.
 
-We welcome contributions! Please follow our contributing guidelines:
+## 🏗️ Architecture
 
-- Fork the repository.
-- Create a new branch for your feature or fix.
-- Write tests.
-- Submit a pull request.
+- **Agent**: The core logic loops through messages, calling Ollama API, and handling tool calls via MCP.
+- **MCP Server**: Acts as the bridge between the LLM and the system, exposing tools like `run_command` and `web_search`.
+- **Shell Actor**: Manages the `docker exec` process, handling stdin/stdout streams to provide a real-time shell experience.
+- **UI**: Renders the application state using Ratatui, handling input and drawing the chat/terminal widgets.
 
-## Todo List
+## 📝 Configuration
 
-- [ ] **Json Formatting:** Implement JSON formatting for requests and responses to allow for more structured data exchange. This will make integration with other tools easier.
-- [ ] **Manual Terminal Control:** Add functionality to allow the agent to take manual terminal control, i.e., send commands to the OS. This is a complex feature and should be approached carefully,
-      focusing on safe and limited functionality (e.g., executing simple shell commands).
-- [ ] **Better UI:** Develop a basic terminal UI using a library like `tui-rs` to provide a more user-friendly interface. This would include features like:
-  - Clearer command display.
-  - Interactive prompt.
-  - History.
-  - Status indicators.
-- [ ] **Error Handling:** Improve error handling to provide more informative messages to the user.
-- [ ] **Logging:** Implement comprehensive logging for debugging and monitoring.
-- [ ] **Command Extensions:** Create a modular command system allowing for easy addition of new commands.
-- [ ] **Context Management:** Implement a robust context management system to maintain conversation history and improve the agent's understanding.
-- [ ] **Testing:** Add extensive unit and integration tests.
-- [ ] **Asynchronous Operations:** Refactor the code to use async/await for improved performance and responsiveness.
-- [ ] **Security:** Add measures to mitigate potential security vulnerabilities. This is especially important if the agent can execute commands.
+Currently, configuration is handled via code constants:
 
-## License
+- **Model**: Defaults to `qwen3:8b` in `src/agent.rs`.
+- **Ollama URL**: Defaults to `http://localhost:11434/api/chat` in `src/agent.rs`.
 
-This project is licensed under the [MIT License](LICENSE).
+## ✅ Todo / Roadmap
 
----
+- [x] **Json Formatting**: Implemented MCP with JSON-based tool calling.
+- [x] **Manual Terminal Control**: Added `ShellSession` and Terminal tab.
+- [x] **Better UI**: Implemented TUI with `ratatui`.
+- [x] **Asynchronous Operations**: Fully async using `tokio`.
+- [x] **Security**: Sandboxed execution via Docker.
+- [ ] **Config File**: Move model configuration to a `config.toml` or environment variables.
+- [ ] **Syntax Highlighting**: Improve code block rendering in the chat UI.
+- [ ] **Session History**: Save and load chat history.
 
-**Note:** This is a starting point. The specific implementation details will depend on your chosen LLM and desired functionality. Remember to replace the placeholder comments and code with your own.
-Good luck!
+## 📄 License
 
-```
-
-Key improvements and explanations:
-
-* **Clearer Structure:**  The `README.md` is organized into sections for easier readability.
-* **Detailed Instructions:** Provides step-by-step instructions for installation and usage.
-* **Configuration Explanation:**  Clearly explains how to configure the agent.
-* **Comprehensive Todo List:** The `Todo List` is expanded with more specific and actionable items, categorized for better organization. The priority levels are indicated using brackets.
-* **JSON Formatting:**  Explicitly includes JSON formatting as a major feature.
-* **Manual Terminal Control Caution:**  Adds a critical note regarding the complexity and potential risks of manual terminal control.  This is vital.
-* **UI Consideration:**  Mentions using `tui-rs` (or a similar library) for a terminal UI.
-* **License Information:**  Includes a license.
-* **Placeholder Reminder:** Reinforces the need to replace placeholder comments.
-* **Error Handling & Logging:**  Highlights the importance of these features.
-* **Modular Command System:** Addresses scalability.
-* **Asynchronous Operations:** Mentions this as an important performance consideration.
-* **Security Emphasis:** Points to the critical need for security measures, particularly if the agent has any control over the OS.
-```
+This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details.
