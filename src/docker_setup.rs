@@ -1,30 +1,21 @@
+use crate::config::Config;
 use anyhow::{anyhow, Result};
-use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CONTAINER_NAME: &str = "ollama_dev_env";
 
-// Helper to get the workspace path from ENV or default
-pub fn get_workspace_path() -> PathBuf {
-    match env::var("LLM_AGENT_WORKSPACE") {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => PathBuf::from("./workspace"),
-    }
-}
-
-pub fn ensure_docker_env() -> Result<()> {
-    let workspace_path = get_workspace_path();
+pub fn ensure_docker_env(config: &Config) -> Result<()> {
+    let workspace_path = &config.workspace_path;
 
     // 1. Create the workspace directory locally if it doesn't exist
     if !workspace_path.exists() {
-        fs::create_dir_all(&workspace_path)?;
+        fs::create_dir_all(workspace_path)?;
         println!("Created local workspace directory at {:?}", workspace_path);
     }
 
     // We need the absolute path for Docker volume mounting
-    let abs_workspace = fs::canonicalize(&workspace_path)?;
+    let abs_workspace = fs::canonicalize(workspace_path)?;
 
     // 2. Check if container is already running
     let status = Command::new("docker")
@@ -49,7 +40,6 @@ pub fn ensure_docker_env() -> Result<()> {
         println!("Starting Docker Sandbox mapped to: {:?}", abs_workspace);
 
         // 4. Run the container
-        // We use the absolute path resolved above
         let status = Command::new("docker")
             .arg("run")
             .arg("-d")
@@ -71,8 +61,7 @@ pub fn ensure_docker_env() -> Result<()> {
         println!("Docker Sandbox started successfully!");
     }
 
-    // 5. Check if Rust/Cargo is installed
-    // We check via 'bash -l -c' to ensure we load the path if it was just installed
+    // 5. Check if Rust/Cargo is installed inside Docker
     let cargo_check = Command::new("docker")
         .args([
             "exec",
@@ -91,11 +80,6 @@ pub fn ensure_docker_env() -> Result<()> {
 
     if needs_install {
         println!("Installing Basic Tools + Rust inside Docker... (This runs once)");
-
-        // This command installs:
-        // 1. curl, git, vim, wget, nano
-        // 2. build-essential (gcc/cc) -> CRITICAL for 'cargo run' to link binaries
-        // 3. Rust (via rustup)
         let install_cmd = "apt-get update && \
                            apt-get install -y curl git vim nano wget build-essential && \
                            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y";

@@ -1,6 +1,7 @@
-use crate::agent::{run_agent_loop, AgentConfig};
+use crate::agent::run_agent_loop;
+use crate::config::Config;
+use crate::mcp::McpRequest;
 use crate::shell::ShellRequest;
-use crate::mcp::McpRequest; // Import MCP types
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::widgets::ListState;
 use tokio::sync::mpsc;
@@ -13,7 +14,13 @@ pub enum AppMode {
 }
 
 #[derive(Clone)]
-pub enum MessageRole { User, Assistant, System, Error, Thinking }
+pub enum MessageRole {
+    User,
+    Assistant,
+    System,
+    Error,
+    Thinking,
+}
 
 #[derive(Clone)]
 pub struct ChatMessage {
@@ -23,7 +30,7 @@ pub struct ChatMessage {
 
 pub enum AppEvent {
     Token(String),
-    Thinking(String), 
+    Thinking(String),
     AgentFinished,
     CommandStart(String),
     CommandEnd(String),
@@ -36,47 +43,51 @@ pub struct App {
     pub mode: AppMode,
     pub input_buffer: String,
     pub messages: Vec<ChatMessage>,
-    
+
     pub chat_scroll: u16,
     pub chat_stick_to_bottom: bool,
-    
+
     pub terminal_lines: Vec<String>,
     pub term_scroll: ListState,
-    
+
     pub is_processing: bool,
-    pub agent_task: Option<JoinHandle<()>>, 
-    
+    pub agent_task: Option<JoinHandle<()>>,
+
     pub event_tx: mpsc::Sender<AppEvent>,
-    pub shell_tx: mpsc::Sender<ShellRequest>, 
-    
-    // New: Handle to the MCP Server
+    pub shell_tx: mpsc::Sender<ShellRequest>,
     pub mcp_tx: mpsc::Sender<McpRequest>,
-    
+
+    pub config: Config,
     pub spinner_frame: usize,
 }
 
 impl App {
     pub fn new(
-        event_tx: mpsc::Sender<AppEvent>, 
+        event_tx: mpsc::Sender<AppEvent>,
         shell_tx: mpsc::Sender<ShellRequest>,
         mcp_tx: mpsc::Sender<McpRequest>,
+        config: Config,
     ) -> Self {
         Self {
             mode: AppMode::Chat,
             input_buffer: String::new(),
-            messages: vec![ChatMessage { role: MessageRole::System, content: "Ready.".into() }],
-            
+            messages: vec![ChatMessage {
+                role: MessageRole::System,
+                content: format!("Ready. Model: {}", config.model),
+            }],
+
             chat_scroll: 0,
-            chat_stick_to_bottom: true, 
-            
+            chat_stick_to_bottom: true,
+
             terminal_lines: vec![String::from("--- Shell Connected ---")],
             term_scroll: ListState::default(),
             is_processing: false,
             agent_task: None,
-            
+
             event_tx,
             shell_tx,
-            mcp_tx, // Store it
+            mcp_tx,
+            config,
             spinner_frame: 0,
         }
     }
@@ -100,14 +111,16 @@ impl App {
             KeyCode::Esc if self.is_processing => {
                 self.abort_agent();
             }
-            
+
             KeyCode::Up => self.scroll_up(),
             KeyCode::Down => self.scroll_down(),
             KeyCode::PageUp => self.scroll_page(-10),
             KeyCode::PageDown => self.scroll_page(10),
-            
+
             KeyCode::Char(c) if !self.is_processing => self.input_buffer.push(c),
-            KeyCode::Backspace if !self.is_processing => { self.input_buffer.pop(); },
+            KeyCode::Backspace if !self.is_processing => {
+                self.input_buffer.pop();
+            }
             KeyCode::Enter if !self.is_processing => {
                 if key.modifiers.contains(KeyModifiers::ALT) {
                     self.input_buffer.push('\n');
@@ -124,27 +137,31 @@ impl App {
             task.abort();
         }
         self.is_processing = false;
-        self.messages.push(ChatMessage { 
-            role: MessageRole::System, 
-            content: "🛑 Cancelled by user.".into() 
+        self.messages.push(ChatMessage {
+            role: MessageRole::System,
+            content: "🛑 Cancelled by user.".into(),
         });
         self.chat_stick_to_bottom = true;
     }
 
     pub fn handle_internal_event(&mut self, event: AppEvent) {
         match event {
-            AppEvent::Tick => if self.is_processing { self.spinner_frame = self.spinner_frame.wrapping_add(1); },
-            
-            // Handle regular tokens (Answer)
+            AppEvent::Tick => {
+                if self.is_processing {
+                    self.spinner_frame = self.spinner_frame.wrapping_add(1);
+                }
+            }
             AppEvent::Token(t) => {
                 let start_new = if let Some(last) = self.messages.last() {
                     !matches!(last.role, MessageRole::Assistant)
                 } else {
                     true
                 };
-
                 if start_new {
-                    self.messages.push(ChatMessage { role: MessageRole::Assistant, content: t });
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::Assistant,
+                        content: t,
+                    });
                 } else {
                     if let Some(last) = self.messages.last_mut() {
                         last.content.push_str(&t);
@@ -152,17 +169,17 @@ impl App {
                 }
                 self.chat_stick_to_bottom = true;
             }
-
-            // Handle thinking tokens - Clean separate blocks
             AppEvent::Thinking(t) => {
-                 let start_new = if let Some(last) = self.messages.last() {
+                let start_new = if let Some(last) = self.messages.last() {
                     !matches!(last.role, MessageRole::Thinking)
                 } else {
                     true
                 };
-
                 if start_new {
-                    self.messages.push(ChatMessage { role: MessageRole::Thinking, content: t });
+                    self.messages.push(ChatMessage {
+                        role: MessageRole::Thinking,
+                        content: t,
+                    });
                 } else {
                     if let Some(last) = self.messages.last_mut() {
                         last.content.push_str(&t);
@@ -170,32 +187,45 @@ impl App {
                 }
                 self.chat_stick_to_bottom = true;
             }
-
             AppEvent::CommandStart(c) => {
-                self.messages.push(ChatMessage { role: MessageRole::System, content: format!("🛠️ {}", c) });
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: format!("🛠️ {}", c),
+                });
                 self.chat_stick_to_bottom = true;
-            },
+            }
             AppEvent::TerminalLine(l) => {
-                let was_at_bottom = self.term_scroll.selected()
+                let was_at_bottom = self
+                    .term_scroll
+                    .selected()
                     .map_or(true, |s| s >= self.terminal_lines.len().saturating_sub(1));
-
                 self.terminal_lines.push(l);
-                
                 if was_at_bottom {
-                    self.term_scroll.select(Some(self.terminal_lines.len().saturating_sub(1)));
+                    self.term_scroll
+                        .select(Some(self.terminal_lines.len().saturating_sub(1)));
                 }
-            },
+            }
             AppEvent::CommandEnd(o) => {
-                let s = if o.len() > 100 { format!("Out ({}b) -> Term", o.len()) } else { o };
-                self.messages.push(ChatMessage { role: MessageRole::System, content: s });
+                let s = if o.len() > 100 {
+                    format!("Out ({}b) -> Term", o.len())
+                } else {
+                    o
+                };
+                self.messages.push(ChatMessage {
+                    role: MessageRole::System,
+                    content: s,
+                });
                 self.chat_stick_to_bottom = true;
-            },
+            }
             AppEvent::AgentFinished => {
                 self.is_processing = false;
                 self.agent_task = None;
-            },
+            }
             AppEvent::Error(e) => {
-                self.messages.push(ChatMessage { role: MessageRole::Error, content: e });
+                self.messages.push(ChatMessage {
+                    role: MessageRole::Error,
+                    content: e,
+                });
                 self.is_processing = false;
                 self.agent_task = None;
                 self.chat_stick_to_bottom = true;
@@ -204,31 +234,35 @@ impl App {
     }
 
     fn submit_message(&mut self) {
-        if self.input_buffer.trim().is_empty() { return; }
+        if self.input_buffer.trim().is_empty() {
+            return;
+        }
         let text = self.input_buffer.clone();
         self.input_buffer.clear();
 
         match self.mode {
             AppMode::Chat => {
                 self.is_processing = true;
-                self.chat_stick_to_bottom = true; 
-                self.messages.push(ChatMessage { role: MessageRole::User, content: text.clone() });
-                
+                self.chat_stick_to_bottom = true;
+                self.messages.push(ChatMessage {
+                    role: MessageRole::User,
+                    content: text.clone(),
+                });
+
                 let tx = self.event_tx.clone();
-                // We don't need shell_tx here for the agent anymore, the agent talks to MCP!
-                // But we still pass the MCP channel
                 let mcp = self.mcp_tx.clone();
                 let history = self.messages.clone();
-                
+                let config = self.config.clone(); // Clone config for agent
+
                 let handle = tokio::spawn(async move {
-                    if let Err(e) = run_agent_loop(AgentConfig::default(), history, tx.clone(), mcp).await {
+                    if let Err(e) = run_agent_loop(config, history, tx.clone(), mcp).await {
                         let _ = tx.send(AppEvent::Error(e.to_string())).await;
                     }
                     let _ = tx.send(AppEvent::AgentFinished).await;
                 });
-                
+
                 self.agent_task = Some(handle);
-            },
+            }
             AppMode::Terminal => {
                 let shell = self.shell_tx.clone();
                 tokio::spawn(async move {
@@ -255,7 +289,7 @@ impl App {
         }
     }
     fn scroll_page(&mut self, amt: i16) {
-         if let AppMode::Chat = self.mode {
+        if let AppMode::Chat = self.mode {
             self.chat_stick_to_bottom = false;
             if amt < 0 {
                 self.chat_scroll = self.chat_scroll.saturating_sub(amt.abs() as u16);
@@ -266,7 +300,7 @@ impl App {
             self.term_scroll_delta(amt as i32);
         }
     }
-    
+
     fn term_scroll_delta(&mut self, delta: i32) {
         let i = self.term_scroll.selected().unwrap_or(0) as i32;
         self.term_scroll.select(Some((i + delta).max(0) as usize));

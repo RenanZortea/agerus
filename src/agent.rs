@@ -1,4 +1,5 @@
 use crate::app::{AppEvent, MessageRole};
+use crate::config::Config;
 use crate::mcp::{McpRequest, ToolDefinition};
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -7,20 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
-const OLLAMA_URL: &str = "http://localhost:11434/api/chat";
 const MAX_LOOPS: usize = 10;
-
-#[derive(Clone)]
-pub struct AgentConfig {
-    pub model: String,
-}
-
-impl Default for AgentConfig {
-    fn default() -> Self {
-        // Updated default to match your curl example
-        Self { model: "qwen3:8b".into() }
-    }
-}
 
 // --- Ollama API Structures ---
 
@@ -30,15 +18,13 @@ struct ChatResponse {
     #[serde(default)]
     done: bool,
     #[serde(default)]
-    error: Option<String>, 
+    error: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
 struct Message {
     content: Option<String>,
-    // FIELD UPDATE: Added 'thinking' to match your curl output
     thinking: Option<String>,
-    // Keep this for compatibility with other models (DeepSeek, etc)
     reasoning_content: Option<String>,
     tool_calls: Option<Vec<ToolCall>>,
 }
@@ -57,175 +43,194 @@ struct ToolFunction {
 // --- The Agent Logic ---
 
 pub async fn run_agent_loop(
-    config: AgentConfig,
+    config: Config,
     history: Vec<crate::app::ChatMessage>,
     app_tx: mpsc::Sender<AppEvent>,
     mcp_tx: mpsc::Sender<McpRequest>,
 ) -> Result<()> {
-    
     // 1. Fetch Tools from MCP Server
     let (tx, rx) = oneshot::channel();
     if let Err(e) = mcp_tx.send(McpRequest::ListTools(tx)).await {
-        app_tx.send(AppEvent::Error(format!("Failed to contact MCP: {}", e))).await?;
+        app_tx
+            .send(AppEvent::Error(format!("Failed to contact MCP: {}", e)))
+            .await?;
         return Ok(());
     }
-    
+
     let tools: Vec<ToolDefinition> = match rx.await {
         Ok(t) => t,
         Err(_) => {
-            app_tx.send(AppEvent::Error("MCP Server dropped connection".into())).await?;
+            app_tx
+                .send(AppEvent::Error("MCP Server dropped connection".into()))
+                .await?;
             return Ok(());
         }
     };
 
-    let ollama_tools: Vec<serde_json::Value> = tools.iter().map(|t| {
-        json!({
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.input_schema
-            }
+    let ollama_tools: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|t| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema
+                }
+            })
         })
-    }).collect();
+        .collect();
 
-    // 2. Prepare Messages
-    let mut messages: Vec<serde_json::Value> = history.iter().map(|msg| {
-        let role = match msg.role {
-            MessageRole::User => "user",
-            MessageRole::Assistant | MessageRole::Thinking => "assistant",
-            MessageRole::System | MessageRole::Error => "system",
-        };
-        json!({ "role": role, "content": msg.content })
-    }).collect();
+    let mut messages: Vec<serde_json::Value> = history
+        .iter()
+        .map(|msg| {
+            let role = match msg.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant | MessageRole::Thinking => "assistant",
+                MessageRole::System | MessageRole::Error => "system",
+            };
+            json!({ "role": role, "content": msg.content })
+        })
+        .collect();
 
     let client = Client::new();
     let mut loops = 0;
 
     loop {
-        if loops >= MAX_LOOPS { break; }
+        if loops >= MAX_LOOPS {
+            break;
+        }
         loops += 1;
 
         let body = json!({
-            "model": config.model,
+            "model": config.model, // Use model from config
             "messages": messages,
             "tools": ollama_tools,
             "stream": true
         });
 
-        let res = client.post(OLLAMA_URL).json(&body).send().await;
+        let res = client.post(&config.ollama_url).json(&body).send().await; // Use URL from config
 
         match res {
             Err(e) => {
-                app_tx.send(AppEvent::Error(format!("Ollama Connection Error: {}", e))).await?;
+                app_tx
+                    .send(AppEvent::Error(format!("Ollama Connection Error: {}", e)))
+                    .await?;
                 break;
             }
             Ok(response) => {
                 if !response.status().is_success() {
                     let text = response.text().await.unwrap_or_default();
-                    app_tx.send(AppEvent::Error(format!("Ollama API Error: {}", text))).await?;
+                    app_tx
+                        .send(AppEvent::Error(format!("Ollama API Error: {}", text)))
+                        .await?;
                     break;
                 }
 
                 let mut stream = response.bytes_stream();
                 let mut buffer = String::new();
-                
                 let mut full_content = String::new();
                 let mut buffer_tools = Vec::new();
-                
-                // Track if we are in a thinking block (for UI grouping)
                 let mut parsing_thought = false;
 
                 while let Some(chunk_res) = stream.next().await {
                     match chunk_res {
                         Err(e) => {
-                            app_tx.send(AppEvent::Error(format!("Stream Error: {}", e))).await?;
+                            app_tx
+                                .send(AppEvent::Error(format!("Stream Error: {}", e)))
+                                .await?;
                             break;
                         }
                         Ok(chunk) => {
                             if let Ok(s) = std::str::from_utf8(&chunk) {
                                 buffer.push_str(s);
-                                
-                                // Process line by line (NDJSON)
                                 while let Some(pos) = buffer.find('\n') {
                                     let line = buffer[..pos].to_string();
-                                    buffer.drain(..=pos); 
+                                    buffer.drain(..=pos);
 
-                                    if line.trim().is_empty() { continue; }
+                                    if line.trim().is_empty() {
+                                        continue;
+                                    }
 
                                     match serde_json::from_str::<ChatResponse>(&line) {
                                         Ok(resp) => {
                                             if let Some(err) = resp.error {
-                                                app_tx.send(AppEvent::Error(format!("Ollama Error: {}", err))).await?;
+                                                app_tx
+                                                    .send(AppEvent::Error(format!(
+                                                        "Ollama Error: {}",
+                                                        err
+                                                    )))
+                                                    .await?;
                                             }
 
                                             if let Some(msg) = resp.message {
-                                                // --- HANDLE THINKING ---
-                                                // Priority 1: "thinking" field (Qwen3 / New Ollama)
                                                 if let Some(think) = msg.thinking {
                                                     if !think.is_empty() {
-                                                        app_tx.send(AppEvent::Thinking(think)).await?;
+                                                        app_tx
+                                                            .send(AppEvent::Thinking(think))
+                                                            .await?;
                                                     }
-                                                } 
-                                                // Priority 2: "reasoning_content" field (DeepSeek)
-                                                else if let Some(reason) = msg.reasoning_content {
+                                                } else if let Some(reason) = msg.reasoning_content {
                                                     if !reason.is_empty() {
-                                                        app_tx.send(AppEvent::Thinking(reason)).await?;
+                                                        app_tx
+                                                            .send(AppEvent::Thinking(reason))
+                                                            .await?;
                                                     }
                                                 }
 
-                                                // --- HANDLE CONTENT ---
                                                 if let Some(content) = msg.content {
                                                     if !content.is_empty() {
                                                         let mut text = content.clone();
-                                                        
-                                                        // Priority 3: Tag parsing fallback (Older models)
                                                         if text.contains("<think>") {
                                                             parsing_thought = true;
                                                             text = text.replace("<think>", "");
                                                         }
-                                                        
+
                                                         if text.contains("</think>") {
                                                             parsing_thought = false;
-                                                            let parts: Vec<&str> = text.split("</think>").collect();
-                                                            
-                                                            // Part before </think> is thought
+                                                            let parts: Vec<&str> =
+                                                                text.split("</think>").collect();
                                                             if let Some(t) = parts.first() {
                                                                 if !t.is_empty() {
-                                                                    app_tx.send(AppEvent::Thinking(t.to_string())).await?;
+                                                                    app_tx
+                                                                        .send(AppEvent::Thinking(
+                                                                            t.to_string(),
+                                                                        ))
+                                                                        .await?;
                                                                 }
                                                             }
-                                                            // Part after </think> is real content
                                                             if parts.len() > 1 {
                                                                 let c = parts[1];
                                                                 if !c.is_empty() {
                                                                     full_content.push_str(c);
-                                                                    app_tx.send(AppEvent::Token(c.to_string())).await?;
+                                                                    app_tx
+                                                                        .send(AppEvent::Token(
+                                                                            c.to_string(),
+                                                                        ))
+                                                                        .await?;
                                                                 }
                                                             }
                                                             continue;
                                                         }
 
-                                                        // If we are currently inside a <think> tag block
                                                         if parsing_thought {
-                                                            app_tx.send(AppEvent::Thinking(text)).await?;
+                                                            app_tx
+                                                                .send(AppEvent::Thinking(text))
+                                                                .await?;
                                                         } else {
-                                                            // Normal content
                                                             full_content.push_str(&text);
-                                                            app_tx.send(AppEvent::Token(text)).await?;
+                                                            app_tx
+                                                                .send(AppEvent::Token(text))
+                                                                .await?;
                                                         }
                                                     }
                                                 }
-
-                                                // --- HANDLE TOOLS ---
                                                 if let Some(calls) = msg.tool_calls {
                                                     buffer_tools.extend(calls);
                                                 }
                                             }
                                         }
-                                        Err(_) => {
-                                            // Skip malformed lines or keep waiting for more data
-                                        }
+                                        Err(_) => {}
                                     }
                                 }
                             }
@@ -237,25 +242,29 @@ pub async fn run_agent_loop(
                     break;
                 }
 
-                // Add assistant response to history
-                messages.push(json!({
-                    "role": "assistant",
-                    "content": full_content,
-                    "tool_calls": buffer_tools
-                }));
+                messages.push(json!({ "role": "assistant", "content": full_content, "tool_calls": buffer_tools }));
 
-                // Execute Tools
                 for tool in &buffer_tools {
                     let (tx, rx) = oneshot::channel();
-                    app_tx.send(AppEvent::CommandStart(format!("{}(...)", tool.function.name))).await?;
-                    
-                    if let Err(e) = mcp_tx.send(McpRequest::CallTool {
-                        name: tool.function.name.clone(),
-                        arguments: tool.function.arguments.clone(),
-                        response_tx: tx,
-                    }).await {
-                         app_tx.send(AppEvent::Error(format!("Failed to call tool: {}", e))).await?;
-                         break;
+                    app_tx
+                        .send(AppEvent::CommandStart(format!(
+                            "{}(...)",
+                            tool.function.name
+                        )))
+                        .await?;
+
+                    if let Err(e) = mcp_tx
+                        .send(McpRequest::CallTool {
+                            name: tool.function.name.clone(),
+                            arguments: tool.function.arguments.clone(),
+                            response_tx: tx,
+                        })
+                        .await
+                    {
+                        app_tx
+                            .send(AppEvent::Error(format!("Failed to call tool: {}", e)))
+                            .await?;
+                        break;
                     }
 
                     let result = match rx.await {
@@ -265,11 +274,7 @@ pub async fn run_agent_loop(
                     };
 
                     app_tx.send(AppEvent::CommandEnd(result.clone())).await?;
-                    
-                    messages.push(json!({
-                        "role": "tool",
-                        "content": result
-                    }));
+                    messages.push(json!({ "role": "tool", "content": result }));
                 }
             }
         }

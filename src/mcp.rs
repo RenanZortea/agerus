@@ -1,11 +1,10 @@
 use crate::shell::ShellRequest;
+use crate::config::Config;
 use anyhow::Result;
 use regex::Regex;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::env;
-use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 
 // --- MCP Protocol Definitions ---
@@ -32,26 +31,20 @@ pub enum McpRequest {
 pub struct McpServer {
     shell_tx: mpsc::Sender<ShellRequest>,
     http_client: reqwest::Client,
-    workspace_root: PathBuf, // New field to store the configured workspace
+    config: Config,
 }
 
 impl McpServer {
-    pub async fn start(shell_tx: mpsc::Sender<ShellRequest>) -> mpsc::Sender<McpRequest> {
+    pub async fn start(shell_tx: mpsc::Sender<ShellRequest>, config: Config) -> mpsc::Sender<McpRequest> {
         let (tx, mut rx) = mpsc::channel(32);
         
-        // Determine workspace root once at startup
-        let workspace_root = match env::var("LLM_AGENT_WORKSPACE") {
-            Ok(p) => PathBuf::from(p),
-            Err(_) => PathBuf::from("./workspace"), // Fallback relative path
-        };
-
         let mut server = Self { 
             shell_tx,
             http_client: reqwest::Client::builder()
                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
-            workspace_root,
+            config,
         };
 
         tokio::spawn(async move {
@@ -158,8 +151,8 @@ impl McpServer {
                 let path = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("Missing path"))?;
                 let content = args.get("content").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("Missing content"))?;
                 
-                // Join with the configured workspace root
-                let target = self.workspace_root.join(path);
+                // Use workspace from Config
+                let target = self.config.workspace_path.join(path);
                 
                 if let Some(p) = target.parent() { tokio::fs::create_dir_all(p).await?; }
                 tokio::fs::write(&target, content).await?;
@@ -168,8 +161,8 @@ impl McpServer {
             "read_file" => {
                 let path = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("Missing path"))?;
                 
-                // Join with the configured workspace root
-                let target = self.workspace_root.join(path);
+                // Use workspace from Config
+                let target = self.config.workspace_path.join(path);
                 
                 if !target.exists() { return Ok(format!("File not found: {}", path)); }
                 let content = tokio::fs::read_to_string(target).await?;
@@ -181,10 +174,9 @@ impl McpServer {
             "list_files" => {
                 let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
                 
-                // Join with the configured workspace root
-                let target = self.workspace_root.join(path_str);
+                // Use workspace from Config
+                let target = self.config.workspace_path.join(path_str);
                 
-                // Safety check: Ensure target exists
                 if !target.exists() {
                      return Ok(format!("Directory not found: {}", path_str));
                 }
