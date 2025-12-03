@@ -1,303 +1,279 @@
-use crate::app::AppEvent;
-use crate::shell::ShellRequest;
+use crate::app::{AppEvent, MessageRole};
+use crate::mcp::{McpRequest, ToolDefinition};
 use anyhow::Result;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::Path;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
-const OLLAMA_URL: &str = "http://localhost:11434/api/generate";
-const MAX_LOOPS: usize = 15;
+const OLLAMA_URL: &str = "http://localhost:11434/api/chat";
+const MAX_LOOPS: usize = 10;
 
+#[derive(Clone)]
 pub struct AgentConfig {
     pub model: String,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        Self {
-            model: "qwen3:8b".to_string(), 
-        }
+        // Updated default to match your curl example
+        Self { model: "qwen3:8b".into() }
     }
 }
 
-#[derive(Deserialize)]
-struct OllamaResponse {
-    response: String,
+// --- Ollama API Structures ---
+
+#[derive(Deserialize, Debug)]
+struct ChatResponse {
+    message: Option<Message>,
+    #[serde(default)]
     done: bool,
     #[serde(default)]
-    context: Option<Vec<i64>>,
+    error: Option<String>, 
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-struct FileOp {
-    path: String,
-    content: String,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-struct ToolAction {
-    thought: Option<String>, 
-    command: Option<String>,
-    write_file: Option<FileOp>,
-    path: Option<String>,
+#[derive(Deserialize, Debug)]
+struct Message {
     content: Option<String>,
+    // FIELD UPDATE: Added 'thinking' to match your curl output
+    thinking: Option<String>,
+    // Keep this for compatibility with other models (DeepSeek, etc)
+    reasoning_content: Option<String>,
+    tool_calls: Option<Vec<ToolCall>>,
 }
 
-struct StreamFilter {
-    full_buffer: String,     // Keeps history for JSON parsing
-    parse_buffer: String,    // Keeps active text for tag detection
-    in_think_block: bool,
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct ToolCall {
+    function: ToolFunction,
 }
 
-impl StreamFilter {
-    fn new() -> Self {
-        Self {
-            full_buffer: String::new(),
-            parse_buffer: String::new(),
-            in_think_block: false,
-        }
-    }
-
-    fn push(&mut self, chunk: &str) -> Vec<(bool, String)> {
-        self.full_buffer.push_str(chunk);
-        self.parse_buffer.push_str(chunk);
-        
-        let mut events = Vec::new();
-        
-        // Loop to process all complete tags in the buffer
-        loop {
-            if self.in_think_block {
-                // Looking for closing tag </think>
-                match self.parse_buffer.find("</think>") {
-                    Some(idx) => {
-                        // Found it! Emit everything before it as thinking
-                        let content = self.parse_buffer[..idx].to_string();
-                        if !content.is_empty() {
-                            events.push((true, content));
-                        }
-                        // Remove the tag and everything before it
-                        self.parse_buffer = self.parse_buffer[idx + 8..].to_string();
-                        self.in_think_block = false;
-                    },
-                    None => {
-                        // No closing tag yet.
-                        // We must be careful not to flush a partial closing tag like "</thi"
-                        // The max length of the tag is 8 ("</think>").
-                        // Keep the last 7 chars in the buffer just in case.
-                        let safe_len = self.parse_buffer.len().saturating_sub(7);
-                        if safe_len > 0 {
-                            let safe_chunk = self.parse_buffer[..safe_len].to_string();
-                            events.push((true, safe_chunk));
-                            self.parse_buffer = self.parse_buffer[safe_len..].to_string();
-                        }
-                        break;
-                    }
-                }
-            } else {
-                // Looking for opening tag <think>
-                match self.parse_buffer.find("<think>") {
-                    Some(idx) => {
-                        // Found start! Emit everything before it as normal token
-                        let content = self.parse_buffer[..idx].to_string();
-                        if !content.is_empty() {
-                            events.push((false, content));
-                        }
-                        // Remove the tag and everything before it
-                        self.parse_buffer = self.parse_buffer[idx + 7..].to_string();
-                        self.in_think_block = true;
-                    },
-                    None => {
-                        // No opening tag yet.
-                        // Keep potential partial tag like "<thi"
-                        // <think> is 7 chars. Keep last 6.
-                        let safe_len = self.parse_buffer.len().saturating_sub(6);
-                        if safe_len > 0 {
-                            let safe_chunk = self.parse_buffer[..safe_len].to_string();
-                            events.push((false, safe_chunk));
-                            self.parse_buffer = self.parse_buffer[safe_len..].to_string();
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        
-        events
-    }
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct ToolFunction {
+    name: String,
+    arguments: serde_json::Value,
 }
 
-fn extract_json_candidate(input: &str) -> Option<String> {
-    let starts: Vec<_> = input.match_indices('{').map(|(i, _)| i).collect();
-    if starts.is_empty() { return None; }
-
-    for start in starts.into_iter().rev() {
-        let mut depth = 0;
-        let mut end_idx = None;
-        
-        for (i, c) in input[start..].char_indices() {
-            match c {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end_idx = Some(start + i);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if let Some(end) = end_idx {
-            let candidate = &input[start..=end];
-            if candidate.contains("\"command\"") || candidate.contains("\"write_file\"") || candidate.contains("\"path\"") {
-                return Some(candidate.to_string());
-            }
-        }
-    }
-    None
-}
+// --- The Agent Logic ---
 
 pub async fn run_agent_loop(
     config: AgentConfig,
-    initial_prompt: String,
-    tx_app: mpsc::Sender<AppEvent>,
-    tx_shell: mpsc::Sender<ShellRequest>,
+    history: Vec<crate::app::ChatMessage>,
+    app_tx: mpsc::Sender<AppEvent>,
+    mcp_tx: mpsc::Sender<McpRequest>,
 ) -> Result<()> {
-    let client = Client::new();
-    let mut current_prompt = initial_prompt;
-    let mut context: Option<Vec<i64>> = None;
-    let mut loop_count = 0;
-
-    let system_prompt = r#"
-    You are an AI Agent.
-    TOOLS:
-    1. "write_file": { "path": "filename", "content": "file content" }
-    2. "command": "shell command string"
-
-    INSTRUCTIONS:
-    1. First, THINK about the problem using <think>...</think> tags.
-    2. Then, output a SINGLE JSON object with your action.
     
-    EXAMPLE:
-    <think>
-    I need to check the current directory.
-    </think>
-    {
-        "command": "ls -la"
+    // 1. Fetch Tools from MCP Server
+    let (tx, rx) = oneshot::channel();
+    if let Err(e) = mcp_tx.send(McpRequest::ListTools(tx)).await {
+        app_tx.send(AppEvent::Error(format!("Failed to contact MCP: {}", e))).await?;
+        return Ok(());
     }
-    "#;
+    
+    let tools: Vec<ToolDefinition> = match rx.await {
+        Ok(t) => t,
+        Err(_) => {
+            app_tx.send(AppEvent::Error("MCP Server dropped connection".into())).await?;
+            return Ok(());
+        }
+    };
+
+    let ollama_tools: Vec<serde_json::Value> = tools.iter().map(|t| {
+        json!({
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.input_schema
+            }
+        })
+    }).collect();
+
+    // 2. Prepare Messages
+    let mut messages: Vec<serde_json::Value> = history.iter().map(|msg| {
+        let role = match msg.role {
+            MessageRole::User => "user",
+            MessageRole::Assistant | MessageRole::Thinking => "assistant",
+            MessageRole::System | MessageRole::Error => "system",
+        };
+        json!({ "role": role, "content": msg.content })
+    }).collect();
+
+    let client = Client::new();
+    let mut loops = 0;
 
     loop {
-        if loop_count >= MAX_LOOPS {
-            tx_app.send(AppEvent::Error("Max loops.".into())).await?;
-            break;
-        }
-        loop_count += 1;
+        if loops >= MAX_LOOPS { break; }
+        loops += 1;
 
-        let request_body = json!({
+        let body = json!({
             "model": config.model,
-            "prompt": current_prompt,
-            "context": context,
-            "system": system_prompt,
-            "stream": true,
+            "messages": messages,
+            "tools": ollama_tools,
+            "stream": true
         });
 
-        let mut stream = client
-            .post(OLLAMA_URL)
-            .json(&request_body)
-            .send()
-            .await?
-            .bytes_stream();
+        let res = client.post(OLLAMA_URL).json(&body).send().await;
 
-        let mut filter = StreamFilter::new();
+        match res {
+            Err(e) => {
+                app_tx.send(AppEvent::Error(format!("Ollama Connection Error: {}", e))).await?;
+                break;
+            }
+            Ok(response) => {
+                if !response.status().is_success() {
+                    let text = response.text().await.unwrap_or_default();
+                    app_tx.send(AppEvent::Error(format!("Ollama API Error: {}", text))).await?;
+                    break;
+                }
 
-        while let Some(item) = stream.next().await {
-            let chunk = item?;
-            if let Ok(json_resp) = serde_json::from_slice::<OllamaResponse>(&chunk) {
-                let events = filter.push(&json_resp.response);
-                for (is_thinking, text) in events {
-                    if is_thinking {
-                        tx_app.send(AppEvent::Thinking(text)).await?;
-                    } else {
-                        tx_app.send(AppEvent::Token(text)).await?;
+                let mut stream = response.bytes_stream();
+                let mut buffer = String::new();
+                
+                let mut full_content = String::new();
+                let mut buffer_tools = Vec::new();
+                
+                // Track if we are in a thinking block (for UI grouping)
+                let mut parsing_thought = false;
+
+                while let Some(chunk_res) = stream.next().await {
+                    match chunk_res {
+                        Err(e) => {
+                            app_tx.send(AppEvent::Error(format!("Stream Error: {}", e))).await?;
+                            break;
+                        }
+                        Ok(chunk) => {
+                            if let Ok(s) = std::str::from_utf8(&chunk) {
+                                buffer.push_str(s);
+                                
+                                // Process line by line (NDJSON)
+                                while let Some(pos) = buffer.find('\n') {
+                                    let line = buffer[..pos].to_string();
+                                    buffer.drain(..=pos); 
+
+                                    if line.trim().is_empty() { continue; }
+
+                                    match serde_json::from_str::<ChatResponse>(&line) {
+                                        Ok(resp) => {
+                                            if let Some(err) = resp.error {
+                                                app_tx.send(AppEvent::Error(format!("Ollama Error: {}", err))).await?;
+                                            }
+
+                                            if let Some(msg) = resp.message {
+                                                // --- HANDLE THINKING ---
+                                                // Priority 1: "thinking" field (Qwen3 / New Ollama)
+                                                if let Some(think) = msg.thinking {
+                                                    if !think.is_empty() {
+                                                        app_tx.send(AppEvent::Thinking(think)).await?;
+                                                    }
+                                                } 
+                                                // Priority 2: "reasoning_content" field (DeepSeek)
+                                                else if let Some(reason) = msg.reasoning_content {
+                                                    if !reason.is_empty() {
+                                                        app_tx.send(AppEvent::Thinking(reason)).await?;
+                                                    }
+                                                }
+
+                                                // --- HANDLE CONTENT ---
+                                                if let Some(content) = msg.content {
+                                                    if !content.is_empty() {
+                                                        let mut text = content.clone();
+                                                        
+                                                        // Priority 3: Tag parsing fallback (Older models)
+                                                        if text.contains("<think>") {
+                                                            parsing_thought = true;
+                                                            text = text.replace("<think>", "");
+                                                        }
+                                                        
+                                                        if text.contains("</think>") {
+                                                            parsing_thought = false;
+                                                            let parts: Vec<&str> = text.split("</think>").collect();
+                                                            
+                                                            // Part before </think> is thought
+                                                            if let Some(t) = parts.first() {
+                                                                if !t.is_empty() {
+                                                                    app_tx.send(AppEvent::Thinking(t.to_string())).await?;
+                                                                }
+                                                            }
+                                                            // Part after </think> is real content
+                                                            if parts.len() > 1 {
+                                                                let c = parts[1];
+                                                                if !c.is_empty() {
+                                                                    full_content.push_str(c);
+                                                                    app_tx.send(AppEvent::Token(c.to_string())).await?;
+                                                                }
+                                                            }
+                                                            continue;
+                                                        }
+
+                                                        // If we are currently inside a <think> tag block
+                                                        if parsing_thought {
+                                                            app_tx.send(AppEvent::Thinking(text)).await?;
+                                                        } else {
+                                                            // Normal content
+                                                            full_content.push_str(&text);
+                                                            app_tx.send(AppEvent::Token(text)).await?;
+                                                        }
+                                                    }
+                                                }
+
+                                                // --- HANDLE TOOLS ---
+                                                if let Some(calls) = msg.tool_calls {
+                                                    buffer_tools.extend(calls);
+                                                }
+                                            }
+                                        }
+                                        Err(_) => {
+                                            // Skip malformed lines or keep waiting for more data
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                if json_resp.done { context = json_resp.context; }
-            }
-        }
 
-        let json_candidate = extract_json_candidate(&filter.full_buffer).unwrap_or("{}".to_string());
-        let raw_value: serde_json::Value = serde_json::from_str(&json_candidate).unwrap_or(json!({}));
-        
-        let mut final_path = None;
-        let mut final_content = None;
-        let mut final_cmd = None;
-
-        if let Some(obj) = raw_value.get("write_file").and_then(|v| v.as_object()) {
-            if let (Some(p), Some(c)) = (obj.get("path").and_then(|v| v.as_str()), obj.get("content").and_then(|v| v.as_str())) {
-                final_path = Some(p.to_string());
-                final_content = Some(c.to_string());
-            }
-        }
-        
-        if final_path.is_none() {
-             if let Some(path_str) = raw_value.get("write_file").and_then(|v| v.as_str()) {
-                 if let Some(content_str) = raw_value.get("content").and_then(|v| v.as_str()) {
-                     final_path = Some(path_str.to_string());
-                     final_content = Some(content_str.to_string());
-                 }
-             }
-        }
-        
-        if let Some(cmd_str) = raw_value.get("command").and_then(|v| v.as_str()) {
-            final_cmd = Some(cmd_str.to_string());
-        }
-
-        if let (Some(path), Some(content)) = (final_path, final_content) {
-            tx_app.send(AppEvent::CommandStart(format!("Writing {}", path))).await?;
-            let target_path = Path::new("workspace").join(&path);
-            if let Some(parent) = target_path.parent() {
-                let _ = tokio::fs::create_dir_all(parent).await;
-            }
-
-            match tokio::fs::write(&target_path, &content).await {
-                Ok(_) => {
-                    tx_app.send(AppEvent::CommandEnd(format!("Wrote {}", path))).await?;
-                    current_prompt = format!("System: Written {}.", path);
+                if buffer_tools.is_empty() {
+                    break;
                 }
-                Err(e) => {
-                    tx_app.send(AppEvent::Error(e.to_string())).await?;
-                    current_prompt = format!("System Error: {}", e);
+
+                // Add assistant response to history
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": full_content,
+                    "tool_calls": buffer_tools
+                }));
+
+                // Execute Tools
+                for tool in &buffer_tools {
+                    let (tx, rx) = oneshot::channel();
+                    app_tx.send(AppEvent::CommandStart(format!("{}(...)", tool.function.name))).await?;
+                    
+                    if let Err(e) = mcp_tx.send(McpRequest::CallTool {
+                        name: tool.function.name.clone(),
+                        arguments: tool.function.arguments.clone(),
+                        response_tx: tx,
+                    }).await {
+                         app_tx.send(AppEvent::Error(format!("Failed to call tool: {}", e))).await?;
+                         break;
+                    }
+
+                    let result = match rx.await {
+                        Ok(Ok(out)) => out,
+                        Ok(Err(e)) => format!("Tool Execution Error: {}", e),
+                        Err(_) => "Tool Execution Panicked".to_string(),
+                    };
+
+                    app_tx.send(AppEvent::CommandEnd(result.clone())).await?;
+                    
+                    messages.push(json!({
+                        "role": "tool",
+                        "content": result
+                    }));
                 }
             }
-        } else if let Some(cmd) = final_cmd {
-            let clean = cmd.trim();
-            if clean.is_empty() || clean == "null" { break; }
-
-            tx_app.send(AppEvent::CommandStart(cmd.clone())).await?;
-            let (resp_tx, mut resp_rx) = mpsc::channel(100);
-            tx_shell.send(ShellRequest::RunCommand { cmd: cmd.clone(), response_tx: resp_tx }).await?;
-
-            let mut output = String::new();
-            while let Some(line) = resp_rx.recv().await {
-                output.push_str(&line);
-                output.push('\n');
-            }
-            if output.len() > 5000 { output = format!("{}\n[Truncated]", &output[..5000]); }
-
-            tx_app.send(AppEvent::CommandEnd(output.clone())).await?;
-            current_prompt = format!("Output:\n{}\nDone?", output);
-        } else {
-            if filter.full_buffer.trim().is_empty() {
-                 tx_app.send(AppEvent::Error("Empty response from agent".to_string())).await?;
-                 break;
-            }
-             break;
         }
     }
+
     Ok(())
 }

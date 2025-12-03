@@ -80,7 +80,7 @@ fn parse_markdown_line(line: &str, in_code_block: bool, base_style: Style) -> (L
     }
     let mut spans = vec![];
     
-    // If we are in a code block, use Green. Otherwise use the base style passed in (Gray for User/Thinking, Yellow for AI)
+    // If we are in a code block, use Green.
     let style = if in_code_block {
         Style::default().fg(Color::Green)
     } else if line.starts_with("# ") {
@@ -114,27 +114,27 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     for (i, msg) in app.messages.iter().enumerate() {
         let (header, h_style, content_style) = match msg.role {
             MessageRole::User => (
-                " USER ",
+                " 👤 USER ",
                 Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
                 Style::default().fg(Color::Gray),
             ),
             MessageRole::Assistant => (
-                " AI ",
+                " 🤖 AI ",
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 Style::default().fg(Color::White),
             ),
             MessageRole::Thinking => (
-                " THINK ",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC).add_modifier(Modifier::BOLD),
+                " 💭 THINK ",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
                 Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
             ),
             MessageRole::System => (
-                " SYS ",
+                " ⚙️ SYS ",
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                 Style::default().fg(Color::DarkGray),
             ),
             MessageRole::Error => (
-                " ERR ",
+                " ❌ ERR ",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 Style::default().fg(Color::Red),
             ),
@@ -151,14 +151,20 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         for line in content.lines() {
             let wrapped = wrap(line, max_width);
             if wrapped.is_empty() {
+                // Keep empty lines for spacing
                 let (l, next_state) = parse_markdown_line("", in_code_block, content_style);
                 in_code_block = next_state;
                 all_lines.push(l);
             }
             for w_line in wrapped {
-                let (l, next_state) = parse_markdown_line(&w_line, in_code_block, content_style);
-                in_code_block = next_state;
-                all_lines.push(l);
+                if matches!(msg.role, MessageRole::Thinking) {
+                    // Render thinking simply without complex markdown parsing to be fast and look like a log
+                    all_lines.push(Line::from(Span::styled(w_line.to_string(), content_style)));
+                } else {
+                    let (l, next_state) = parse_markdown_line(&w_line, in_code_block, content_style);
+                    in_code_block = next_state;
+                    all_lines.push(l);
+                }
             }
         }
 
@@ -168,6 +174,12 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::Yellow),
             )));
         }
+        
+        // Add a small divider after Thinking blocks to separate them visually from the answer
+        if matches!(msg.role, MessageRole::Thinking) {
+            all_lines.push(Line::from(Span::styled("──────", Style::default().fg(Color::DarkGray))));
+        }
+        
         all_lines.push(Line::from(""));
     }
 

@@ -1,5 +1,6 @@
 use crate::agent::{run_agent_loop, AgentConfig};
 use crate::shell::ShellRequest;
+use crate::mcp::McpRequest; // Import MCP types
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::widgets::ListState;
 use tokio::sync::mpsc;
@@ -22,7 +23,7 @@ pub struct ChatMessage {
 
 pub enum AppEvent {
     Token(String),
-    Thinking(String), // New event for thinking stream
+    Thinking(String), 
     AgentFinished,
     CommandStart(String),
     CommandEnd(String),
@@ -47,11 +48,19 @@ pub struct App {
     
     pub event_tx: mpsc::Sender<AppEvent>,
     pub shell_tx: mpsc::Sender<ShellRequest>, 
+    
+    // New: Handle to the MCP Server
+    pub mcp_tx: mpsc::Sender<McpRequest>,
+    
     pub spinner_frame: usize,
 }
 
 impl App {
-    pub fn new(event_tx: mpsc::Sender<AppEvent>, shell_tx: mpsc::Sender<ShellRequest>) -> Self {
+    pub fn new(
+        event_tx: mpsc::Sender<AppEvent>, 
+        shell_tx: mpsc::Sender<ShellRequest>,
+        mcp_tx: mpsc::Sender<McpRequest>,
+    ) -> Self {
         Self {
             mode: AppMode::Chat,
             input_buffer: String::new(),
@@ -67,6 +76,7 @@ impl App {
             
             event_tx,
             shell_tx,
+            mcp_tx, // Store it
             spinner_frame: 0,
         }
     }
@@ -127,8 +137,6 @@ impl App {
             
             // Handle regular tokens (Answer)
             AppEvent::Token(t) => {
-                // If the last message was Thinking, we start a NEW Assistant message
-                // If the last message was Assistant, we append.
                 let start_new = if let Some(last) = self.messages.last() {
                     !matches!(last.role, MessageRole::Assistant)
                 } else {
@@ -145,7 +153,7 @@ impl App {
                 self.chat_stick_to_bottom = true;
             }
 
-            // Handle thinking tokens
+            // Handle thinking tokens - Clean separate blocks
             AppEvent::Thinking(t) => {
                  let start_new = if let Some(last) = self.messages.last() {
                     !matches!(last.role, MessageRole::Thinking)
@@ -164,7 +172,7 @@ impl App {
             }
 
             AppEvent::CommandStart(c) => {
-                self.messages.push(ChatMessage { role: MessageRole::System, content: c });
+                self.messages.push(ChatMessage { role: MessageRole::System, content: format!("🛠️ {}", c) });
                 self.chat_stick_to_bottom = true;
             },
             AppEvent::TerminalLine(l) => {
@@ -205,14 +213,15 @@ impl App {
                 self.is_processing = true;
                 self.chat_stick_to_bottom = true; 
                 self.messages.push(ChatMessage { role: MessageRole::User, content: text.clone() });
-                // We do NOT push an empty Assistant message here anymore, 
-                // because the first response might be Thinking.
                 
                 let tx = self.event_tx.clone();
-                let shell = self.shell_tx.clone();
+                // We don't need shell_tx here for the agent anymore, the agent talks to MCP!
+                // But we still pass the MCP channel
+                let mcp = self.mcp_tx.clone();
+                let history = self.messages.clone();
                 
                 let handle = tokio::spawn(async move {
-                    if let Err(e) = run_agent_loop(AgentConfig::default(), text, tx.clone(), shell).await {
+                    if let Err(e) = run_agent_loop(AgentConfig::default(), history, tx.clone(), mcp).await {
                         let _ = tx.send(AppEvent::Error(e.to_string())).await;
                     }
                     let _ = tx.send(AppEvent::AgentFinished).await;
