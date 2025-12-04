@@ -25,7 +25,7 @@ fn setup_container(config: &Config, force_restart: bool) -> Result<()> {
     let abs_workspace = fs::canonicalize(workspace_path)?;
 
     // Check status
-    let status = Command::new("docker")
+    let output = Command::new("docker")
         .args([
             "ps",
             "--filter",
@@ -33,10 +33,10 @@ fn setup_container(config: &Config, force_restart: bool) -> Result<()> {
             "--format",
             "{{.Names}}",
         ])
-        .output()?;
+        .output()?; // Use output() to capture stdout
 
-    let output = String::from_utf8_lossy(&status.stdout);
-    let is_running = output.trim() == CONTAINER_NAME;
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    let is_running = output_str.trim() == CONTAINER_NAME;
 
     if !is_running || force_restart {
         // Kill existing
@@ -45,7 +45,8 @@ fn setup_container(config: &Config, force_restart: bool) -> Result<()> {
             .output();
 
         // Start new
-        let status = Command::new("docker")
+        // CHANGED: .status()? -> .output()? to prevent printing Container ID to TUI
+        let output = Command::new("docker")
             .arg("run")
             .arg("-d")
             .arg("--name")
@@ -56,12 +57,12 @@ fn setup_container(config: &Config, force_restart: bool) -> Result<()> {
             .arg("/workspace")
             .arg("ubuntu:latest")
             .args(["tail", "-f", "/dev/null"])
-            .status()?;
+            .output()?;
 
-        if !status.success() {
+        if !output.status.success() {
             return Err(anyhow!("Failed to start Docker container."));
         }
-        
+
         // Only verify/install rust if we actually restarted/created the container
         check_and_install_tools()?;
     }
@@ -87,15 +88,15 @@ fn check_and_install_tools() -> Result<()> {
     };
 
     if needs_install {
-        // Silent install if possible, or log to stdout (which might mess up TUI if not careful, 
-        // but this usually runs before TUI or during a pause)
+        // Silent install if possible
         let install_cmd = "apt-get update && \
                            apt-get install -y curl git vim nano wget build-essential && \
                            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y";
 
+        // CHANGED: .status()? -> .output()? to prevent printing apt-get logs to TUI
         Command::new("docker")
             .args(["exec", CONTAINER_NAME, "bash", "-c", install_cmd])
-            .status()?;
+            .output()?;
     }
     Ok(())
 }

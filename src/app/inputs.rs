@@ -23,6 +23,18 @@ impl App {
                     self.open_model_selector();
                     return;
                 }
+                KeyCode::Char('t') => {
+                    // Toggle latest thinking message
+                    if let Some(msg) = self
+                        .messages
+                        .iter_mut()
+                        .rev()
+                        .find(|m| matches!(m.role, MessageRole::Thinking))
+                    {
+                        msg.collapsed = !msg.collapsed;
+                    }
+                    return;
+                }
                 _ => {}
             }
         }

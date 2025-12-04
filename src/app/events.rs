@@ -82,7 +82,13 @@ impl App {
         };
 
         if start_new {
-            self.messages.push(ChatMessage { role, content });
+            // Default Thinking blocks to collapsed
+            let collapsed = matches!(role, MessageRole::Thinking);
+            self.messages.push(ChatMessage {
+                role,
+                content,
+                collapsed,
+            });
         } else {
             if let Some(last) = self.messages.last_mut() {
                 last.content.push_str(&content);

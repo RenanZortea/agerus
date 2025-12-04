@@ -33,6 +33,8 @@ pub enum MessageRole {
 pub struct ChatMessage {
     pub role: MessageRole,
     pub content: String,
+    #[serde(default)]
+    pub collapsed: bool, // Track expanded/collapsed state
 }
 
 pub enum AppEvent {
@@ -101,6 +103,7 @@ impl App {
             messages: vec![ChatMessage {
                 role: MessageRole::System,
                 content: format!("Ready. Model: {}", config.model),
+                collapsed: false,
             }],
             current_session,
             session_manager,
@@ -128,7 +131,11 @@ impl App {
 
     // Helper used by all sub-modules
     pub fn add_system_message(&mut self, content: String, role: MessageRole) {
-        self.messages.push(ChatMessage { role, content });
+        self.messages.push(ChatMessage {
+            role,
+            content,
+            collapsed: false,
+        });
         self.chat_stick_to_bottom = true;
     }
 }

@@ -13,9 +13,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let centered = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(5),
-            Constraint::Percentage(90),
-            Constraint::Percentage(5),
+            Constraint::Percentage(15),
+            Constraint::Percentage(70),
+            Constraint::Percentage(15),
         ])
         .split(area)[1];
 
