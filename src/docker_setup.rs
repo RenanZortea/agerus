@@ -3,7 +3,8 @@ use anyhow::{anyhow, Result};
 use std::fs;
 use std::process::Command;
 
-const CONTAINER_NAME: &str = "ollama_dev_env";
+// Changed name to force a fresh container creation if the old one was stale/broken
+const CONTAINER_NAME: &str = "agerus_sandbox";
 
 pub fn ensure_docker_env(config: &Config) -> Result<()> {
     let workspace_path = &config.workspace_path;
@@ -37,7 +38,10 @@ pub fn ensure_docker_env(config: &Config) -> Result<()> {
             .args(["rm", "-f", CONTAINER_NAME])
             .output();
 
-        println!("Starting Docker Sandbox mapped to: {:?}", abs_workspace);
+        println!(
+            "Starting Docker Sandbox ({}) mapped to: {:?}",
+            CONTAINER_NAME, abs_workspace
+        );
 
         // 4. Run the container
         let status = Command::new("docker")
@@ -45,6 +49,7 @@ pub fn ensure_docker_env(config: &Config) -> Result<()> {
             .arg("-d")
             .arg("--name")
             .arg(CONTAINER_NAME)
+            // Mount the absolute path of the workspace to /workspace inside the container
             .arg("-v")
             .arg(format!("{}:/workspace", abs_workspace.to_string_lossy()))
             .arg("-w")
@@ -79,7 +84,7 @@ pub fn ensure_docker_env(config: &Config) -> Result<()> {
     };
 
     if needs_install {
-        println!("Installing Basic Tools + Rust inside Docker... (This runs once)");
+        println!("Installing Basic Tools + Rust inside Docker... (This may take a minute)");
         let install_cmd = "apt-get update && \
                            apt-get install -y curl git vim nano wget build-essential && \
                            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y";

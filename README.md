@@ -1,4 +1,4 @@
-# Copilot Rust Llama
+# Agerus
 
 ![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)
 ![Rust](https://img.shields.io/badge/Made_with-Rust-orange.svg)
@@ -38,8 +38,8 @@ Before running the agent, ensure you have the following installed:
 ### Clone the repository
 
 ```bash
-git clone https://github.com/renanzortea/copilot_rust_llama.git
-cd copilot_rust_llama
+git clone https://github.com/renanzortea/agerus.git
+cd agerus
 ```
 
 ### Run the setup script
@@ -55,10 +55,10 @@ Follow the prompts to select your workspace folder.
 
 ### Start the agent
 
-The setup script creates a wrapper called `run_agent.sh` containing your configuration.
+The setup script creates a wrapper called `agerus.sh` containing your configuration.
 
 ```bash
-./run_agent.sh
+./agerus.sh
 ```
 
 **Controls:**
