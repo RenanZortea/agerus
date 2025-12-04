@@ -93,6 +93,7 @@ Currently, configuration is handled via code constants:
 - [ ] **Syntax Highlighting**: Improve code block rendering in the chat UI.
 - [ ] **Session History**: Save and load chat history.
 - [ ] **Cloud Models**: Switch to cloud models like Gemini, ChatGPT, or Claude.
+- [ ] **No Tooling Models Support**: Support for models that do not support tooling.
 
 ## 📄 License
 

@@ -1,10 +1,10 @@
 use crate::app::{App, AppMode, MessageRole};
-use crate::markdown::render_markdown; // Import the new renderer
+use crate::markdown::render_markdown;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Padding, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph},
     Frame,
 };
 
@@ -17,6 +17,7 @@ const FG_SECONDARY: Color = Color::Rgb(139, 148, 158);
 const ACCENT_CYAN: Color = Color::Rgb(88, 166, 255);
 const ACCENT_GREEN: Color = Color::Rgb(63, 185, 80);
 const ACCENT_RED: Color = Color::Rgb(248, 81, 73);
+const CODE_COLOR: Color = Color::Rgb(255, 123, 114);
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -30,6 +31,63 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_sidebar(f, app, main_layout[0]);
     draw_main_content(f, app, main_layout[1]);
+
+    if app.mode == AppMode::ModelSelector {
+        draw_model_selector(f, app, area);
+    }
+}
+
+fn draw_model_selector(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(" Select Model (Enter: Select | Space: Set Default) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT_CYAN))
+        .bg(BG_SIDEBAR);
+
+    let area = centered_rect(60, 50, area);
+    f.render_widget(Clear, area);
+    f.render_widget(block.clone(), area);
+
+    let inner = block.inner(area);
+
+    let items: Vec<ListItem> = app.available_models.iter().map(|m| {
+        let is_current = *m == app.config.model;
+        let style = if is_current {
+            Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(FG_PRIMARY)
+        };
+        
+        let prefix = if is_current { "✓ " } else { "  " };
+        ListItem::new(format!("{}{}", prefix, m)).style(style)
+    }).collect();
+
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(Color::Rgb(40,40,40)).add_modifier(Modifier::BOLD))
+        .highlight_symbol(">> ");
+
+    let mut state = app.model_list_state.clone();
+    f.render_stateful_widget(list, inner, &mut state);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
@@ -42,7 +100,12 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Length(2), Constraint::Min(1), Constraint::Length(3)])
+        .constraints([
+            Constraint::Length(8), // Header
+            Constraint::Length(1), // Spacer
+            Constraint::Min(1),    // Session History
+            Constraint::Length(3), // Footer
+        ])
         .split(inner_area);
 
     // Header
@@ -63,22 +126,36 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     ];
     f.render_widget(Paragraph::new(header_text).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(BORDER_COLOR)).padding(Padding::new(1, 1, 1, 1))), chunks[0]);
 
-    // Navigation
-    let active = Style::default().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD);
-    let inactive = Style::default().fg(FG_SECONDARY);
-    let nav_items = vec![
-        ListItem::new(if app.mode == AppMode::Chat { "● Chat" } else { "○ Chat" }).style(if app.mode == AppMode::Chat { active } else { inactive }),
-        ListItem::new(if app.mode == AppMode::Terminal { "● Terminal" } else { "○ Terminal" }).style(if app.mode == AppMode::Terminal { active } else { inactive }),
-        ListItem::new(""),
-        ListItem::new(Line::from(vec![Span::styled("Session:", Style::default().fg(FG_SECONDARY).add_modifier(Modifier::UNDERLINED))])),
-        ListItem::new(Line::from(Span::styled(&app.current_session, Style::default().fg(ACCENT_GREEN)))),
-        ListItem::new(""),
-        ListItem::new(Line::from(vec![Span::styled("Commands:", Style::default().fg(FG_SECONDARY).add_modifier(Modifier::UNDERLINED))])),
-        ListItem::new(Line::from(vec![Span::styled("/new", Style::default().fg(FG_PRIMARY)), Span::raw(" - New Chat")])),
-        ListItem::new(Line::from(vec![Span::styled("/load", Style::default().fg(FG_PRIMARY)), Span::raw(" - Load Chat")])),
-        ListItem::new(Line::from(vec![Span::styled("/list", Style::default().fg(FG_PRIMARY)), Span::raw(" - List Chats")])),
+    // Session History
+    let mut history_items = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled("History", Style::default().fg(FG_SECONDARY).add_modifier(Modifier::UNDERLINED))
+        ])),
     ];
-    f.render_widget(List::new(nav_items).block(Block::default().padding(Padding::horizontal(1))), chunks[2]);
+
+    for session in &app.sessions {
+        let is_active = *session == app.current_session;
+        let style = if is_active {
+            Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(FG_PRIMARY)
+        };
+        let icon = if is_active { "● " } else { "○ " };
+        history_items.push(ListItem::new(Line::from(vec![
+            Span::raw(icon),
+            Span::styled(session.clone(), style)
+        ])));
+    }
+    
+    // Add commands help
+    history_items.push(ListItem::new(""));
+    history_items.push(ListItem::new(Line::from(vec![Span::styled("Cmds:", Style::default().fg(FG_SECONDARY).add_modifier(Modifier::UNDERLINED))])));
+    history_items.push(ListItem::new(Line::from(vec![Span::styled("/add <file>", Style::default().fg(FG_PRIMARY)), Span::raw(" - Context")])));
+    history_items.push(ListItem::new(Line::from(vec![Span::styled("/cd <path>", Style::default().fg(FG_PRIMARY)), Span::raw(" - Change Dir")])));
+    history_items.push(ListItem::new(Line::from(vec![Span::styled("/new", Style::default().fg(FG_PRIMARY)), Span::raw(" - New Chat")])));
+    history_items.push(ListItem::new(Line::from(vec![Span::styled("Ctrl+p", Style::default().fg(FG_PRIMARY)), Span::raw(" - Model")])));
+
+    f.render_widget(List::new(history_items).block(Block::default().padding(Padding::horizontal(1))), chunks[2]);
 
     // Footer
     let (symbol, style) = if app.is_processing {
@@ -95,7 +172,7 @@ fn draw_main_content(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     match app.mode {
-        AppMode::Chat => draw_chat_view(f, app, chunks[0]),
+        AppMode::Chat | AppMode::ModelSelector => draw_chat_view(f, app, chunks[0]),
         AppMode::Terminal => draw_terminal_view(f, app, chunks[0]),
     }
 
@@ -113,29 +190,20 @@ fn draw_chat_view(f: &mut Frame, app: &App, area: Rect) {
     for msg in &app.messages {
         match msg.role {
             MessageRole::System => {
-                // System messages are simple text
                 lines.push(Line::from(Span::styled(format!("  >> {}", msg.content), Style::default().fg(FG_SECONDARY))));
             }
             MessageRole::Thinking => {
-                // Render thinking with Markdown too, but styled as Italic/Dim
                 lines.push(Line::from(vec![Span::styled("  ⚡ Thinking...", Style::default().fg(FG_SECONDARY).add_modifier(Modifier::ITALIC))]));
-                
-                // We use a narrower width for thinking blocks to indent them
                 let think_width = max_width.saturating_sub(4);
                 let base_style = Style::default().fg(FG_SECONDARY).add_modifier(Modifier::ITALIC);
-                
-                // Render using the new markdown engine
                 let rendered = render_markdown(&msg.content, think_width, base_style);
-                
                 for line in rendered {
-                    // Prepend indentation
                     let mut spans = vec![Span::raw("    ")];
                     spans.extend(line.spans);
                     lines.push(Line::from(spans));
                 }
             }
             _ => {
-                // Header
                 let (name, style, color) = match msg.role {
                     MessageRole::User => ("User", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD), FG_PRIMARY),
                     MessageRole::Error => ("Error", Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD), ACCENT_RED),
@@ -146,9 +214,7 @@ fn draw_chat_view(f: &mut Frame, app: &App, area: Rect) {
                     Span::styled(chrono::Local::now().format("%H:%M").to_string(), Style::default().fg(FG_SECONDARY)),
                 ]));
 
-                // Content - Render with Markdown!
                 if matches!(msg.role, MessageRole::Error) {
-                    // Errors usually raw text
                     lines.push(Line::from(Span::styled(&msg.content, Style::default().fg(color))));
                 } else {
                     let base_style = Style::default().fg(color);
@@ -157,7 +223,7 @@ fn draw_chat_view(f: &mut Frame, app: &App, area: Rect) {
                 }
             }
         }
-        lines.push(Line::from("")); // Margin
+        lines.push(Line::from(""));
     }
 
     let scroll = if app.chat_stick_to_bottom {

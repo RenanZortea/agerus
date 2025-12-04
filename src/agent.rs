@@ -102,14 +102,40 @@ pub async fn run_agent_loop(
         }
         loops += 1;
 
-        let body = json!({
-            "model": config.model, // Use model from config
+        // Try with tools first
+        let mut body = json!({
+            "model": config.model,
             "messages": messages,
             "tools": ollama_tools,
             "stream": true
         });
 
-        let res = client.post(&config.ollama_url).json(&body).send().await; // Use URL from config
+        let mut res = client.post(&config.ollama_url).json(&body).send().await;
+
+        // --- Fallback Logic ---
+        // If the request failed with 400 Bad Request, it usually means the model
+        // doesn't support the "tools" parameter. We retry without it.
+        if let Ok(ref response) = res {
+            if response.status() == reqwest::StatusCode::BAD_REQUEST {
+                // Read the error message to be sure (requires consuming, so we might need to clone or just assume)
+                // For simplicity, we assume 400 on chat endpoint = tools issue or bad prompt.
+                // Let's try stripping tools.
+                
+                app_tx.send(AppEvent::Thinking(format!(
+                    "Model '{}' rejected tools. Falling back to text-only mode.", 
+                    config.model
+                ))).await?;
+
+                body = json!({
+                    "model": config.model,
+                    "messages": messages,
+                    // "tools": removed
+                    "stream": true
+                });
+                
+                res = client.post(&config.ollama_url).json(&body).send().await;
+            }
+        }
 
         match res {
             Err(e) => {
@@ -164,23 +190,22 @@ pub async fn run_agent_loop(
                                             }
 
                                             if let Some(msg) = resp.message {
+                                                // Handle native thinking fields (deepseek-r1 often uses reasoning_content)
                                                 if let Some(think) = msg.thinking {
                                                     if !think.is_empty() {
-                                                        app_tx
-                                                            .send(AppEvent::Thinking(think))
-                                                            .await?;
+                                                        app_tx.send(AppEvent::Thinking(think)).await?;
                                                     }
                                                 } else if let Some(reason) = msg.reasoning_content {
                                                     if !reason.is_empty() {
-                                                        app_tx
-                                                            .send(AppEvent::Thinking(reason))
-                                                            .await?;
+                                                        app_tx.send(AppEvent::Thinking(reason)).await?;
                                                     }
                                                 }
 
                                                 if let Some(content) = msg.content {
                                                     if !content.is_empty() {
                                                         let mut text = content.clone();
+                                                        
+                                                        // Parse <think> tags if model outputs them in content
                                                         if text.contains("<think>") {
                                                             parsing_thought = true;
                                                             text = text.replace("<think>", "");
@@ -192,36 +217,24 @@ pub async fn run_agent_loop(
                                                                 text.split("</think>").collect();
                                                             if let Some(t) = parts.first() {
                                                                 if !t.is_empty() {
-                                                                    app_tx
-                                                                        .send(AppEvent::Thinking(
-                                                                            t.to_string(),
-                                                                        ))
-                                                                        .await?;
+                                                                    app_tx.send(AppEvent::Thinking(t.to_string())).await?;
                                                                 }
                                                             }
                                                             if parts.len() > 1 {
                                                                 let c = parts[1];
                                                                 if !c.is_empty() {
                                                                     full_content.push_str(c);
-                                                                    app_tx
-                                                                        .send(AppEvent::Token(
-                                                                            c.to_string(),
-                                                                        ))
-                                                                        .await?;
+                                                                    app_tx.send(AppEvent::Token(c.to_string())).await?;
                                                                 }
                                                             }
                                                             continue;
                                                         }
 
                                                         if parsing_thought {
-                                                            app_tx
-                                                                .send(AppEvent::Thinking(text))
-                                                                .await?;
+                                                            app_tx.send(AppEvent::Thinking(text)).await?;
                                                         } else {
                                                             full_content.push_str(&text);
-                                                            app_tx
-                                                                .send(AppEvent::Token(text))
-                                                                .await?;
+                                                            app_tx.send(AppEvent::Token(text)).await?;
                                                         }
                                                     }
                                                 }
